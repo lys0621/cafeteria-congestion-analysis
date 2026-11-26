@@ -1,0 +1,326 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+{% block page_subtitle %}프레임 이미지 + ROI(좌석/테이블) + YOLO bbox(FT) 오버레이, 현재 프레임 KPI{% endblock %}
+
+{% block content %}
+  <style>
+    .preview-wrap{ position:relative; width:100%; border:1px solid var(--border); border-radius:12px; overflow:hidden; background:var(--bg2); }
+    .preview-img{ width:100%; height:auto; display:block; }
+    .preview-svg{ position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }
+    .legend{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:12px; }
+    .chip{ display:inline-flex; align-items:center; gap:6px; }
+    .dot{ width:10px; height:10px; border-radius:3px; border:1px solid var(--border); }
+    .btn{ padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:var(--bg2); color:var(--text); cursor:pointer; }
+    .btn.primary{ border-color:rgba(11,87,208,0.65); background:rgba(11,87,208,0.12); }
+  </style>
+
+  <div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+    <div class="legend">
+      <span class="chip"><span class="dot" style="background:rgba(0,180,0,0.18);"></span>Seat: Occupied</span>
+      <span class="chip"><span class="dot" style="background:rgba(220,0,0,0.18);"></span>Seat: Empty</span>
+      <span class="chip"><span class="dot" style="background:rgba(11,87,208,0.10);"></span>Table ROI</span>
+      <span class="chip"><span class="dot" style="background:rgba(255,0,0,0.85);"></span>Person bbox(FT)</span>
+    </div>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <button id="btnStart" class="btn primary">Start</button>
+      <button id="btnStop"  class="btn">Stop</button>
+      <button id="btnReset" class="btn">Reset</button>
+    </div>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="row" style="align-items:flex-start;">
+    <div class="card" style="flex:1; min-width:520px;">
+      <div style="display:flex; justify-content:space-between; align-items:flex-end; gap:10px; flex-wrap:wrap;">
+        <div>
+          <div style="font-weight:900;">Place Preview</div>
+          <div id="previewNote" style="color:var(--muted); font-size:13px; margin-top:4px;">Loading...</div>
+        </div>
+      </div>
+      <div class="spacer"></div>
+      <div class="preview-wrap">
+        <img id="placeImg" class="preview-img" alt="frame" />
+        <svg id="roiSvg" class="preview-svg"></svg>
+      </div>
+    </div>
+
+    <div style="flex:1; min-width:420px;">
+      <div class="row" id="kpis"></div>
+      <div class="spacer"></div>
+      <div class="card">
+        <div style="font-weight:900; margin-bottom:6px;">Status</div>
+        <div id="statusLine" style="color:var(--muted); font-size:13px;">Loading...</div>
+      </div>
+    </div>
+  </div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.ACTIVE_NAV = "dash";
+
+  const TICK_MS = 1000;
+  const DET_CONF = 0.25;
+
+  let timer = null;
+
+  function getParam(name, fallback=null){
+    const u = new URL(window.location.href);
+    return u.searchParams.get(name) ?? fallback;
+  }
+  async function getJSON(url){
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return await r.json();
+  }
+  async function post(url){
+    const r = await fetch(url, {method:"POST"});
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return await r.json();
+  }
+
+  function card(title, value, sub="") {
+    return `
+      <div class="card kpi">
+        <div class="t">${title}</div>
+        <div class="v">${value}</div>
+        <div class="s">${sub}</div>
+      </div>
+    `;
+  }
+
+  function svgEl(tag, attrs={}) {
+    const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    Object.entries(attrs).forEach(([k,v]) => e.setAttribute(k, String(v)));
+    return e;
+  }
+
+  function setFrameImage(place, frame){
+    const img = document.getElementById("placeImg");
+    const url = `/api/frame_image?place=${encodeURIComponent(place)}&frame=${encodeURIComponent(frame)}&ts=${Date.now()}`;
+    img.src = url;
+    img.onerror = () => { img.style.display = "none"; };
+    img.onload  = () => { img.style.display = "block"; };
+  }
+
+  function drawRoisAndBoxes(roi, seatsResp) {
+    const svg = document.getElementById("roiSvg");
+    svg.innerHTML = "";
+
+    const W = Number(roi.image_w || 640);
+    const H = Number(roi.image_h || 360);
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+    const seatsMap = {};
+    (seatsResp.seats || []).forEach(s => { seatsMap[s.seat_id] = !!s.occupied; });
+
+    const tablesMap = {};
+    (seatsResp.tables || []).forEach(t => { tablesMap[t.table_id] = !!t.occupied; });
+
+    // tables ROI (blue)
+    (roi.tables || []).forEach(item => {
+      const typ = item.type || "rect";
+      const fill = "rgba(11,87,208,0.10)";
+      const stroke = "rgba(11,87,208,0.55)";
+
+      if (typ === "polygon") {
+        const pts = (item.points || []).map(p => p.join(",")).join(" ");
+        svg.appendChild(svgEl("polygon", {points: pts, fill, stroke, "stroke-width": 2}));
+      } else {
+        const r = item.roi || {};
+        const x1 = Number(r.x1||0), y1 = Number(r.y1||0), x2 = Number(r.x2||0), y2 = Number(r.y2||0);
+        svg.appendChild(svgEl("rect", {x:x1, y:y1, width:Math.max(0,x2-x1), height:Math.max(0,y2-y1), fill, stroke, "stroke-width":2}));
+      }
+
+      if (item.table_id){
+        const x = (typ==="polygon"?(item.points?.[0]?.[0]||0):(item.roi?.x1||0)) + 6;
+        const y = (typ==="polygon"?(item.points?.[0]?.[1]||0):(item.roi?.y1||0)) + 16;
+        const txt = svgEl("text", {x, y, fill:"rgba(11,87,208,0.95)", "font-size":14, "font-weight":900});
+        txt.textContent = item.table_id + (tablesMap[item.table_id] ? " (occ)" : "");
+        svg.appendChild(txt);
+      }
+    });
+
+    // Counters 추가 (display-only, gray dashed) ----------
+    const zones = roi.counters || [];
+    zones.forEach(item => {
+      const typ = item.type || "rect";
+      const zoneId = item.zone_id || item.roi_id || "";
+
+      if (typ === "polygon") {
+        const pts = (item.points || []).map(p => p.join(",")).join(" ");
+        svg.appendChild(svgEl("polygon", {
+          points: pts,
+          fill: "rgba(80,80,80,0.10)",
+          stroke: "rgba(80,80,80,0.65)",
+          "stroke-width": 2,
+          "stroke-dasharray": "6 4"
+        }));
+
+        // label (optional)
+        const ps = (item.points || []);
+        if (ps.length >= 3 && zoneId) {
+          const cx = ps.reduce((s,p)=>s+p[0],0) / ps.length;
+          const cy = ps.reduce((s,p)=>s+p[1],0) / ps.length;
+          const text = svgEl("text", {
+            x: cx, y: cy,
+            "font-size": 14,
+            "font-weight": 800,
+            fill: "rgba(60,60,60,0.9)",
+            "text-anchor": "middle",
+            "dominant-baseline": "middle"
+          });
+          text.textContent = zoneId;
+          svg.appendChild(text);
+        }
+      } else {
+        const r = item.roi || {};
+        const x1 = Number(r.x1||0), y1 = Number(r.y1||0), x2 = Number(r.x2||0), y2 = Number(r.y2||0);
+        svg.appendChild(svgEl("rect", {
+          x: x1, y: y1, width: Math.max(0, x2-x1), height: Math.max(0, y2-y1),
+          fill: "rgba(80,80,80,0.10)",
+          stroke: "rgba(80,80,80,0.65)",
+          "stroke-width": 2,
+          "stroke-dasharray": "6 4"
+        }));
+
+        // label (optional)
+        if (zoneId) {
+          const cx = x1 + Math.max(0, x2-x1)/2;
+          const cy = y1 + Math.max(0, y2-y1)/2;
+          const text = svgEl("text", {
+            x: cx, y: cy,
+            "font-size": 14,
+            "font-weight": 800,
+            fill: "rgba(60,60,60,0.9)",
+            "text-anchor": "middle",
+            "dominant-baseline": "middle"
+          });
+          text.textContent = zoneId;
+          svg.appendChild(text);
+        }
+      }
+    });
+
+    // seats ROI (green/red)
+    (roi.seats || []).forEach(item => {
+      const sid = item.seat_id;
+      const occ = !!seatsMap[sid];
+
+      const fill = occ ? "rgba(0,180,0,0.18)" : "rgba(220,0,0,0.18)";
+      const stroke = occ ? "rgba(0,140,0,0.75)" : "rgba(180,0,0,0.75)";
+
+      const typ = item.type || "rect";
+      if (typ === "polygon") {
+        const pts = (item.points || []).map(p => p.join(",")).join(" ");
+        svg.appendChild(svgEl("polygon", {points: pts, fill, stroke, "stroke-width": 2}));
+      } else {
+        const r = item.roi || {};
+        const x1 = Number(r.x1||0), y1 = Number(r.y1||0), x2 = Number(r.x2||0), y2 = Number(r.y2||0);
+        svg.appendChild(svgEl("rect", {x:x1, y:y1, width:Math.max(0,x2-x1), height:Math.max(0,y2-y1), fill, stroke, "stroke-width":2}));
+      }
+
+      if (sid){
+        const x = (typ==="polygon"?(item.points?.[0]?.[0]||0):(item.roi?.x1||0)) + 6;
+        const y = (typ==="polygon"?(item.points?.[0]?.[1]||0):(item.roi?.y1||0)) + 16;
+        const txt = svgEl("text", {x, y, fill:"rgba(40,40,40,0.95)", "font-size":14, "font-weight":900});
+        txt.textContent = sid;
+        svg.appendChild(txt);
+      }
+    });
+
+    // bbox overlay
+    (seatsResp.detections || []).forEach(d => {
+      svg.appendChild(svgEl("rect", {
+        x: +d.x1 || 0, y: +d.y1 || 0,
+        width: Math.max(0,(+d.x2||0)-(+d.x1||0)),
+        height: Math.max(0,(+d.y2||0)-(+d.y1||0)),
+        fill: "rgba(255,0,0,0.00)",
+        stroke: "rgba(255,0,0,0.85)",
+        "stroke-width": 2
+      }));
+    });
+  }
+
+  async function renderOnceAndMaybeStep(){
+    const place = getParam("place", "placeA");
+    const occ_method = getParam("occ_method", "B");
+
+    const st = await getJSON(`/api/player/state?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    if (st.frame == null){
+      document.getElementById("statusLine").innerText = "No frames in pred_occupancy.";
+      return;
+    }
+
+    const info  = await getJSON(`/api/place_info?place=${encodeURIComponent(place)}`);
+    const seats = await getJSON(`/api/seats?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}&frame=${encodeURIComponent(st.frame)}&det_variant=ft&conf=${DET_CONF}`);
+    const met   = await getJSON(`/api/metrics?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}&frame=${encodeURIComponent(st.frame)}`);
+
+    document.getElementById("kpis").innerHTML = [
+      card("Place", place, `occ_method=${occ_method}`),
+      card("Frame", st.frame, `idx=${st.idx+1}/${st.n_frames}`),
+      card("Seats", info.num_seats ?? "-", "ROI"),
+      card("Tables", info.num_tables ?? "-", "ROI"),
+      card("People", met.people_count ?? "-", "current"),
+      card("Seat Occupancy", (met.seat_occupancy_rate ?? "-") + "%", "current"),
+      card("Table Occupancy", (met.table_occupancy_rate ?? "-") + "%", "current"),
+      card("Crowd Level", met.crowd_level ?? "-", "LOW/MED/HIGH")
+    ].join("");
+
+    document.getElementById("statusLine").innerText =
+      `playing=${st.playing} | place=${place}, occ_method=${occ_method}, frame=${st.frame}, ts=${met.timestamp ?? "-"} | source=${met.source ?? "-"}`;
+
+    document.getElementById("previewNote").innerText = `ROI + bbox(FT) | frame=${st.frame}`;
+
+    setFrameImage(place, st.frame);
+    drawRoisAndBoxes(info.roi || {}, seats);
+
+    if (st.playing){
+      await post(`/api/player/step?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    }
+  }
+
+  function startLoop(){
+    if (timer) return;
+    timer = setInterval(() => renderOnceAndMaybeStep().catch(console.error), TICK_MS);
+  }
+  function stopLoop(){
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+
+  async function onStart(){
+    const place = getParam("place", "placeA");
+    const occ_method = getParam("occ_method", "B");
+    await post(`/api/player/start?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    await renderOnceAndMaybeStep();
+  }
+  async function onStop(){
+    const place = getParam("place", "placeA");
+    const occ_method = getParam("occ_method", "B");
+    await post(`/api/player/stop?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    await renderOnceAndMaybeStep();
+  }
+  async function onReset(){
+    const place = getParam("place", "placeA");
+    const occ_method = getParam("occ_method", "B");
+    await post(`/api/player/reset?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    await renderOnceAndMaybeStep();
+  }
+
+  (async function init(){
+    await renderOnceAndMaybeStep();
+    startLoop();
+
+    document.getElementById("btnStart")?.addEventListener("click", ()=>onStart().catch(console.error));
+    document.getElementById("btnStop") ?.addEventListener("click", ()=>onStop().catch(console.error));
+    document.getElementById("btnReset")?.addEventListener("click", ()=>onReset().catch(console.error));
+
+    window.addEventListener("beforeunload", ()=>stopLoop());
+  })();
+</script>
+{% endblock %}

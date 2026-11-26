@@ -1,0 +1,388 @@
+{% extends "base.html" %}
+
+{% block title %}Congestion{% endblock %}
+{% block page_title %}Congestion{% endblock %}
+{% block page_subtitle %}첫 프레임부터 순차 누적되는 혼잡도(Seat/Table/People) 타임라인{% endblock %}
+
+{% block content %}
+<style>
+  .btn{ padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:var(--bg2); color:var(--text); cursor:pointer; }
+  .btn.primary{ border-color:rgba(11,87,208,0.65); background:rgba(11,87,208,0.12); }
+  .meta{ color:var(--muted); font-size:13px; }
+  .chart-wrap{ border:1px solid var(--border); border-radius:12px; padding:12px; background:var(--bg2); }
+  canvas{ width:100%; height:260px; display:block; }
+  .heat-wrap{ border:1px solid var(--border); border-radius:12px; padding:12px; background:var(--bg2); }
+  .heat-canvas{ width:100%; height:auto; display:block; border-radius:12px; }
+</style>
+
+<div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+  <div>
+    <div style="font-weight:900;">Timeline (cumulative)</div>
+    <div id="meta" class="meta">Loading...</div>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <button id="btnStart" class="btn primary">Start</button>
+    <button id="btnStop"  class="btn">Stop</button>
+    <button id="btnReset" class="btn">Reset</button>
+  </div>
+</div>
+
+<div class="spacer"></div>
+
+<div class="chart-wrap">
+  <canvas id="chart"></canvas>
+</div>
+
+<div class="spacer"></div>
+
+<div class="card">
+  <div style="font-weight:900;">Heatmap (cumulative)</div>
+  <div class="meta">재생 프레임들을 누적하여 사람 foot-point 분포를 heatmap으로 표시</div>
+  <div class="spacer"></div>
+  <div class="heat-wrap">
+    <canvas id="heat" class="heat-canvas"></canvas>
+  </div>
+</div>
+{% endblock %}
+
+
+{% block scripts %}
+<script>
+  window.ACTIVE_NAV = "cong";
+
+  const TICK_MS = 1000;
+  const DISPLAY_LIMIT = 600;
+
+  let timer = null;
+
+  // 누적
+  const xs = [];
+  const seat = [];
+  const table = [];
+  const people = [];
+
+  // Heatmap 누적 (grid)
+  const HEAT_W = 40;
+  const HEAT_H = 24;
+  let heatGrid = Array.from({length: HEAT_H}, () => Array.from({length: HEAT_W}, () => 0));
+  let heatMax = 1;
+  let roiInfoCached = null;
+
+  function getParam(name, fallback=null){
+    const u = new URL(window.location.href);
+    return u.searchParams.get(name) ?? fallback;
+  }
+  async function getJSON(url){
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return await r.json();
+  }
+  async function post(url){
+    const r = await fetch(url, {method:"POST"});
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return await r.json();
+  }
+
+  function tailArr(arr){
+    if (arr.length <= DISPLAY_LIMIT) return arr;
+    return arr.slice(arr.length - DISPLAY_LIMIT);
+  }
+
+  function drawLineChart(canvasId, series, opts={}){
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(700, Math.floor(rect.width * devicePixelRatio));
+    canvas.height = Math.floor(260 * devicePixelRatio);
+    const W=canvas.width,H=canvas.height;
+
+    ctx.clearRect(0,0,W,H);
+
+    const pad = 40 * devicePixelRatio;
+    const x0=pad,y0=H-pad,x1=W-pad,y1=pad;
+
+    const allX=[], allY=[];
+    series.forEach(s=>{ allX.push(...s.xs); allY.push(...s.ys); });
+    if (!allX.length){
+      ctx.fillStyle="rgba(90,90,90,0.95)";
+      ctx.font = `${12*devicePixelRatio}px sans-serif`;
+      ctx.fillText("No data yet. Press Start.", x0, y1+20*devicePixelRatio);
+      return;
+    }
+
+    const xmin=Math.min(...allX), xmax=Math.max(...allX);
+    const ymin=(opts.ymin!==undefined)?opts.ymin:Math.min(...allY);
+    const ymax=(opts.ymax!==undefined)?opts.ymax:Math.max(...allY);
+
+    const xScale = x => x0 + ((x-xmin)/Math.max(1e-9,(xmax-xmin))) * (x1-x0);
+    const yScale = y => y0 - ((y-ymin)/Math.max(1e-9,(ymax-ymin))) * (y0-y1);
+
+    // axes
+    ctx.strokeStyle="rgba(120,120,120,0.5)";
+    ctx.lineWidth=1*devicePixelRatio;
+    ctx.beginPath(); ctx.moveTo(x0,y1); ctx.lineTo(x0,y0); ctx.lineTo(x1,y0); ctx.stroke();
+
+    // grid + ticks
+    const ticks=4;
+    ctx.font = `${12*devicePixelRatio}px sans-serif`;
+    for (let i=0;i<=ticks;i++){
+      const t=i/ticks;
+      const yv=ymin+(ymax-ymin)*t;
+      const yy=yScale(yv);
+      ctx.strokeStyle="rgba(120,120,120,0.18)";
+      ctx.beginPath(); ctx.moveTo(x0,yy); ctx.lineTo(x1,yy); ctx.stroke();
+      ctx.fillStyle="rgba(90,90,90,0.95)";
+      ctx.fillText(yv.toFixed(0), 6*devicePixelRatio, yy+4*devicePixelRatio);
+    }
+
+    // lines
+    series.forEach(s=>{
+      ctx.strokeStyle=s.color;
+      ctx.lineWidth=2*devicePixelRatio;
+      ctx.beginPath();
+      for (let i=0;i<s.xs.length;i++){
+        const xx=xScale(s.xs[i]);
+        const yy=yScale(s.ys[i]);
+        if (i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);
+      }
+      ctx.stroke();
+    });
+
+    // legend
+    let lx=x0, ly=y1-10*devicePixelRatio;
+    series.forEach(s=>{
+      ctx.fillStyle=s.color;
+      ctx.fillRect(lx,ly,10*devicePixelRatio,10*devicePixelRatio);
+      ctx.fillStyle="rgba(40,40,40,0.95)";
+      ctx.fillText(s.name, lx+14*devicePixelRatio, ly+10*devicePixelRatio);
+      lx += 160*devicePixelRatio;
+    });
+  }
+
+  function footPointFromBox(b, alpha=0.12){
+    const x1=+b.x1||0, y1=+b.y1||0, x2=+b.x2||0, y2=+b.y2||0;
+    const xc = (x1+x2)/2;
+    const h = Math.max(1e-6, (y2-y1));
+    const y = y2 - alpha*h;
+    return [xc, y];
+  }
+
+  function drawHeatmap(){
+    const canvas = document.getElementById("heat");
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+
+    // image plane 기반(ROI image_w/h)에 맞춰 그리기
+    const W0 = Number(roiInfoCached?.roi?.image_w || roiInfoCached?.image_w || 640);
+    const H0 = Number(roiInfoCached?.roi?.image_h || roiInfoCached?.image_h || 360);
+    const scale = devicePixelRatio;
+
+    // 화면 폭에 맞춰 비율 유지
+    const targetW = Math.max(640, Math.floor(rect.width * scale));
+    const targetH = Math.floor((targetW * H0 / Math.max(1, W0)));
+    canvas.width = targetW;
+    canvas.height = targetH;
+
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    // cell size
+    const cw = canvas.width / HEAT_W;
+    const ch = canvas.height / HEAT_H;
+
+    // heat cells
+    for (let y=0;y<HEAT_H;y++){
+      for (let x=0;x<HEAT_W;x++){
+        const v = heatGrid[y][x];
+        if (v <= 0) continue;
+        const a = Math.min(0.75, (v / Math.max(1, heatMax)) * 0.75);
+        ctx.fillStyle = `rgba(255,0,0,${a})`;
+        ctx.fillRect(x*cw, y*ch, cw, ch);
+      }
+    }
+
+    // ROI outline overlay (optional, for context)
+    const roi = roiInfoCached?.roi || {};
+    ctx.lineWidth = 2*scale;
+    ctx.strokeStyle = "rgba(11,87,208,0.55)";
+    (roi.tables||[]).forEach(item=>{
+      if ((item.type||"rect") === "polygon"){
+        const pts = item.points || [];
+        if (pts.length < 2) return;
+        ctx.beginPath();
+        pts.forEach((p,i)=>{
+          const px = (p[0]/W0) * canvas.width;
+          const py = (p[1]/H0) * canvas.height;
+          if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+        });
+        ctx.closePath();
+        ctx.stroke();
+      } else {
+        const r=item.roi||{};
+        const x1=(+r.x1||0)/W0*canvas.width;
+        const y1=(+r.y1||0)/H0*canvas.height;
+        const x2=(+r.x2||0)/W0*canvas.width;
+        const y2=(+r.y2||0)/H0*canvas.height;
+        ctx.strokeRect(x1,y1,Math.max(0,x2-x1),Math.max(0,y2-y1));
+      }
+    });
+
+    ctx.strokeStyle = "rgba(40,40,40,0.40)";
+    (roi.seats||[]).forEach(item=>{
+      if ((item.type||"rect") === "polygon"){
+        const pts = item.points || [];
+        if (pts.length < 2) return;
+        ctx.beginPath();
+        pts.forEach((p,i)=>{
+          const px = (p[0]/W0) * canvas.width;
+          const py = (p[1]/H0) * canvas.height;
+          if (i===0) ctx.moveTo(px,py); else ctx.lineTo(px,py);
+        });
+        ctx.closePath();
+        ctx.stroke();
+      } else {
+        const r=item.roi||{};
+        const x1=(+r.x1||0)/W0*canvas.width;
+        const y1=(+r.y1||0)/H0*canvas.height;
+        const x2=(+r.x2||0)/W0*canvas.width;
+        const y2=(+r.y2||0)/H0*canvas.height;
+        ctx.strokeRect(x1,y1,Math.max(0,x2-x1),Math.max(0,y2-y1));
+      }
+    });
+  }
+
+  function heatAddPoints(points, W0, H0){
+    points.forEach(([x,y])=>{
+      const gx = Math.max(0, Math.min(HEAT_W-1, Math.floor((x / Math.max(1,W0)) * HEAT_W)));
+      const gy = Math.max(0, Math.min(HEAT_H-1, Math.floor((y / Math.max(1,H0)) * HEAT_H)));
+      heatGrid[gy][gx] += 1;
+      if (heatGrid[gy][gx] > heatMax) heatMax = heatGrid[gy][gx];
+    });
+  }
+
+  async function pushMetricsForFrame(place, occ_method, frame, playing, idx, n_frames){
+    const m = await getJSON(`/api/metrics?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}&frame=${encodeURIComponent(frame)}`);
+
+    xs.push(Number(m.frame));
+    seat.push(Number(m.seat_occupancy_rate));
+    table.push(Number(m.table_occupancy_rate));
+    people.push(Number(m.people_count));
+
+    const xs2 = tailArr(xs);
+    const seat2 = tailArr(seat);
+    const table2 = tailArr(table);
+    const people2 = tailArr(people);
+
+    // people은 %축에 같이 그리기 위해 간단 스케일
+    const peopleScaled = people2.map(v => Math.min(100, v*5));
+
+    drawLineChart("chart",[
+      {name:"Seat(%)",  color:"rgba(0,180,0,0.9)", xs:xs2, ys:seat2},
+      {name:"Table(%)", color:"rgba(11,87,208,0.9)", xs:xs2, ys:table2},
+      {name:"People(x5)", color:"rgba(60,60,60,0.55)", xs:xs2, ys:peopleScaled},
+    ],{ymin:0,ymax:100});
+
+    const meta = document.getElementById("meta");
+    if (meta){
+      meta.innerText = `playing=${playing} | idx=${idx+1}/${n_frames} | frame=${m.frame} | ts=${m.timestamp ?? "-"}`;
+    }
+  }
+
+  async function pushHeatForFrame(place, occ_method, frame){
+    // detections 기반 누적(FT bbox)
+    if (!roiInfoCached){
+      roiInfoCached = await getJSON(`/api/place_info?place=${encodeURIComponent(place)}`);
+    }
+    const W0 = Number(roiInfoCached?.roi?.image_w || roiInfoCached?.image_w || 640);
+    const H0 = Number(roiInfoCached?.roi?.image_h || roiInfoCached?.image_h || 360);
+
+    const seats = await getJSON(`/api/seats?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}&frame=${encodeURIComponent(frame)}&det_variant=ft&conf=0.25`);
+    const dets = seats.detections || [];
+    const pts = dets.map(b => footPointFromBox(b));
+    heatAddPoints(pts, W0, H0);
+    drawHeatmap();
+  }
+
+  async function renderOnceAndMaybeStep(){
+    const place = getParam("place","placeA");
+    const occ_method = getParam("occ_method","B");
+
+    const st = await getJSON(`/api/player/state?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    if (st.frame == null){
+      const meta = document.getElementById("meta");
+      if (meta) meta.innerText = "No frames in pred_occupancy.";
+      return;
+    }
+
+    // 누적: 현재 frame 값을 push
+    await pushMetricsForFrame(place, occ_method, st.frame, st.playing, st.idx, st.n_frames);
+    await pushHeatForFrame(place, occ_method, st.frame);
+
+    if (st.playing){
+      await post(`/api/player/step?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    }
+  }
+
+  function startLoop(){
+    if (timer) return;
+    timer = setInterval(() => renderOnceAndMaybeStep().catch(console.error), TICK_MS);
+  }
+  function stopLoop(){
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+
+  async function onStart(){
+    const place = getParam("place","placeA");
+    const occ_method = getParam("occ_method","B");
+    await post(`/api/player/start?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    await renderOnceAndMaybeStep();
+  }
+  async function onStop(){
+    const place = getParam("place","placeA");
+    const occ_method = getParam("occ_method","B");
+    await post(`/api/player/stop?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    // stop은 누적엔 영향 없음(현재 상태 1회 반영만)
+    await renderOnceAndMaybeStep();
+  }
+  async function onReset(){
+    const place = getParam("place","placeA");
+    const occ_method = getParam("occ_method","B");
+
+    // player reset
+    await post(`/api/player/reset?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+
+    // local 누적 reset
+    xs.length = 0; seat.length = 0; table.length = 0; people.length = 0;
+    drawLineChart("chart", [], {ymin:0,ymax:100});
+
+    // heat reset
+    heatGrid = Array.from({length: HEAT_H}, () => Array.from({length: HEAT_W}, () => 0));
+    heatMax = 1;
+    drawHeatmap();
+
+    // reset 직후 현재 frame(0)을 1회 push할지 여부는 선택
+    await renderOnceAndMaybeStep();
+  }
+
+  (async function init(){
+    // 초기 진입 시: 누적을 새로 만들지, 기존을 유지할지는 정책 선택.
+    // 여기서는 "페이지 재진입 시에도 누적은 새로"가 더 직관적이어서 reset 없이 1회만 push.
+    // (원하면 init에서 xs/seat/...를 초기화하고 시작할 수도 있음)
+    // heatmap canvas 초기 그리기
+    roiInfoCached = await getJSON(`/api/place_info?place=${encodeURIComponent(getParam("place","placeA"))}`);
+    drawHeatmap();
+
+    await renderOnceAndMaybeStep();
+    startLoop();
+
+    const s = document.getElementById("btnStart");
+    const p = document.getElementById("btnStop");
+    const r = document.getElementById("btnReset");
+    if (s) s.addEventListener("click", ()=>onStart().catch(console.error));
+    if (p) p.addEventListener("click", ()=>onStop().catch(console.error));
+    if (r) r.addEventListener("click", ()=>onReset().catch(console.error));
+
+    window.addEventListener("beforeunload", ()=>stopLoop());
+  })();
+</script>
+{% endblock %}

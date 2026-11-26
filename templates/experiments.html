@@ -1,0 +1,260 @@
+{% extends "base.html" %}
+
+{% block title %}Experiments{% endblock %}
+{% block page_title %}Experiments{% endblock %}
+{% block page_subtitle %}Detection(exp_yolov8l/base vs ft) + Occupancy(Ⅰ vs Ⅱ) 요약 테이블 및 per-frame 그래프(최근 60){% endblock %}
+
+{% block content %}
+<style>
+  .tbl{ width:100%; border-collapse:collapse; font-size:13px; }
+  .tbl th, .tbl td{ padding:6px 6px; border-bottom:1px solid var(--border); text-align:left; }
+  .tbl th{ color:var(--muted); font-weight:900; }
+  .chart-wrap{ border:1px solid var(--border); border-radius:12px; padding:12px; background:var(--bg2); }
+  canvas{ width:100%; height:260px; display:block; }
+  .meta{ color:var(--muted); font-size:13px; }
+</style>
+
+<div class="row" style="align-items:flex-start;">
+  <div class="card" style="flex:1; min-width:520px;">
+    <div style="font-weight:900;">Detection Summary (base vs ft)</div>
+    <div id="detMeta" class="meta">Loading...</div>
+    <div class="spacer"></div>
+    <div style="overflow:auto;">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Variant</th><th>Precision</th><th>Recall</th><th>TP</th><th>FP</th><th>FN</th><th>avgFPS</th><th>avg_infer_ms</th><th>frames</th>
+          </tr>
+        </thead>
+        <tbody id="detSummary"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card" style="flex:1; min-width:520px;">
+    <div style="font-weight:900;">Occupancy Summary (Logic Ⅰ vs Ⅱ)</div>
+    <div id="occMeta" class="meta">Loading...</div>
+    <div class="spacer"></div>
+    <div style="overflow:auto;">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>Method</th><th>overall_accuracy</th><th>seat_accuracy</th><th>table_accuracy</th><th>overall_n</th><th>frames</th><th>pred_source</th>
+          </tr>
+        </thead>
+        <tbody id="occSummary"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<div class="spacer"></div>
+
+<div class="card">
+  <div style="font-weight:900;">Detection per-frame (Precision/Recall) — last 60</div>
+  <div id="detPfMeta" class="meta">Loading...</div>
+  <div class="spacer"></div>
+  <div class="chart-wrap"><canvas id="detChart"></canvas></div>
+</div>
+
+<div class="spacer"></div>
+
+<div class="card">
+  <div style="font-weight:900;">Occupancy per-frame — last 60</div>
+  <div id="occPfMeta" class="meta">Loading...</div>
+  <div class="spacer"></div>
+
+  <div class="chart-wrap" style="margin-bottom:12px;">
+    <div class="meta" style="margin-bottom:6px;">Seat accuracy (place A vs B)</div>
+    <canvas id="occSeatChart"></canvas>
+  </div>
+
+  <div class="chart-wrap">
+    <div class="meta" style="margin-bottom:6px;">Table accuracy (place A vs B)</div>
+    <canvas id="occTableChart"></canvas>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  window.ACTIVE_NAV = "exp";
+  const REFRESH_MS = 1000;
+  const LIMIT = 60;
+
+  function getParam(name, fallback=null){
+    const u = new URL(window.location.href);
+    return u.searchParams.get(name) ?? fallback;
+  }
+  async function getJSON(url){
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return await r.json();
+  }
+  function fmt(v){
+    if (v === null || v === undefined) return "-";
+    if (typeof v === "number") return (Number.isFinite(v)? String(v) : "-");
+    return String(v);
+  }
+  function tail(arr){
+    if (!Array.isArray(arr)) return [];
+    return (arr.length > LIMIT) ? arr.slice(-LIMIT) : arr;
+  }
+
+  function drawLineChart(canvasId, series, opts={}){
+    const canvas = document.getElementById(canvasId);
+    const ctx = canvas.getContext("2d");
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(700, Math.floor(rect.width * devicePixelRatio));
+    canvas.height = Math.floor(260 * devicePixelRatio);
+    const W=canvas.width,H=canvas.height;
+
+    ctx.clearRect(0,0,W,H);
+
+    const pad = 40 * devicePixelRatio;
+    const x0=pad,y0=H-pad,x1=W-pad,y1=pad;
+
+    const allX=[], allY=[];
+    series.forEach(s=>{ allX.push(...s.xs); allY.push(...s.ys); });
+    if (!allX.length){
+      ctx.fillStyle="rgba(160,160,160,0.9)";
+      ctx.fillText("No data", x0, y1+20*devicePixelRatio);
+      return;
+    }
+
+    const xmin=Math.min(...allX), xmax=Math.max(...allX);
+    const ymin=(opts.ymin!==undefined)?opts.ymin:Math.min(...allY);
+    const ymax=(opts.ymax!==undefined)?opts.ymax:Math.max(...allY);
+
+    const xScale = x => x0 + ((x-xmin)/Math.max(1e-9,(xmax-xmin))) * (x1-x0);
+    const yScale = y => y0 - ((y-ymin)/Math.max(1e-9,(ymax-ymin))) * (y0-y1);
+
+    // axes
+    ctx.strokeStyle="rgba(160,160,160,0.6)";
+    ctx.lineWidth=1*devicePixelRatio;
+    ctx.beginPath(); ctx.moveTo(x0,y1); ctx.lineTo(x0,y0); ctx.lineTo(x1,y0); ctx.stroke();
+
+    // y ticks
+    const ticks=4;
+    ctx.font = `${12*devicePixelRatio}px sans-serif`;
+    for (let i=0;i<=ticks;i++){
+      const t=i/ticks;
+      const yv=ymin+(ymax-ymin)*t;
+      const yy=yScale(yv);
+      ctx.strokeStyle="rgba(160,160,160,0.20)";
+      ctx.beginPath(); ctx.moveTo(x0,yy); ctx.lineTo(x1,yy); ctx.stroke();
+      ctx.fillStyle="rgba(160,160,160,0.9)";
+      ctx.fillText(yv.toFixed(2), 6*devicePixelRatio, yy+4*devicePixelRatio);
+    }
+
+    // lines
+    series.forEach(s=>{
+      ctx.strokeStyle=s.color;
+      ctx.lineWidth=2*devicePixelRatio;
+      ctx.beginPath();
+      for (let i=0;i<s.xs.length;i++){
+        const xx=xScale(s.xs[i]);
+        const yy=yScale(s.ys[i]);
+        if (i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);
+      }
+      ctx.stroke();
+    });
+
+    // legend
+    let lx=x0, ly=y1-10*devicePixelRatio;
+    series.forEach(s=>{
+      ctx.fillStyle=s.color;
+      ctx.fillRect(lx,ly,10*devicePixelRatio,10*devicePixelRatio);
+      ctx.fillStyle="rgba(220,220,220,0.95)";
+      ctx.fillText(s.name, lx+14*devicePixelRatio, ly+10*devicePixelRatio);
+      lx += 150*devicePixelRatio;
+    });
+  }
+
+  function detRow(name, obj){
+    if (!obj || Object.keys(obj).length===0){
+      return `<tr><td>${name}</td><td colspan="8" style="color:var(--muted);">missing</td></tr>`;
+    }
+    return `
+      <tr>
+        <td style="font-weight:900;">${name}</td>
+        <td>${fmt(obj.precision)}</td>
+        <td>${fmt(obj.recall)}</td>
+        <td>${fmt(obj.tp)}</td>
+        <td>${fmt(obj.fp)}</td>
+        <td>${fmt(obj.fn)}</td>
+        <td>${fmt(obj.avgFPS)}</td>
+        <td>${fmt(obj.avg_infer_ms)}</td>
+        <td>${fmt(obj.frames_compared)}</td>
+      </tr>
+    `;
+  }
+
+  function occRow(name, obj){
+    if (!obj || Object.keys(obj).length===0){
+      return `<tr><td>${name}</td><td colspan="6" style="color:var(--muted);">missing</td></tr>`;
+    }
+    return `
+      <tr>
+        <td style="font-weight:900;">${name}</td>
+        <td>${fmt(obj.overall_accuracy)}</td>
+        <td>${fmt(obj.seat_accuracy)}</td>
+        <td>${fmt(obj.table_accuracy)}</td>
+        <td>${fmt(obj.overall_n)}</td>
+        <td>${fmt(obj.frames_compared)}</td>
+        <td>${fmt(obj.pred_source)}</td>
+      </tr>
+    `;
+  }
+
+  async function render(){
+    const place = getParam("place","placeA");
+
+    // Detection detail (includes per_frame)
+    const detDetail = await getJSON(`/api/experiments/detection_detail?place=${encodeURIComponent(place)}`);
+    const base = detDetail.base || {};
+    const ft = detDetail.ft || {};
+
+    document.getElementById("detMeta").innerText = `place=${place} | files=exp_yolov8l.json, exp_yolov8l_ft.json`;
+    document.getElementById("detSummary").innerHTML = detRow("base", base) + detRow("ft", ft);
+
+    const bpf = tail(base.per_frame || []);
+    const fpf = tail(ft.per_frame || []);
+    document.getElementById("detPfMeta").innerText = `shown(last ${LIMIT}): base=${bpf.length}, ft=${fpf.length}`;
+
+    drawLineChart("detChart",[
+      {name:"base P", color:"rgba(0,180,0,0.9)", xs:bpf.map(r=>+r.frame), ys:bpf.map(r=>+(r.precision ?? 0))},
+      {name:"base R", color:"rgba(0,180,0,0.45)", xs:bpf.map(r=>+r.frame), ys:bpf.map(r=>+(r.recall ?? 0))},
+      {name:"ft P",   color:"rgba(11,87,208,0.9)", xs:fpf.map(r=>+r.frame), ys:fpf.map(r=>+(r.precision ?? 0))},
+      {name:"ft R",   color:"rgba(11,87,208,0.45)", xs:fpf.map(r=>+r.frame), ys:fpf.map(r=>+(r.recall ?? 0))},
+    ],{ymin:0,ymax:1});
+
+    // Occupancy detail
+    const occDetail = await getJSON(`/api/experiments/occupancy_detail?place=${encodeURIComponent(place)}`);
+    const A = occDetail.logicA || {};
+    const B = occDetail.logicB || {};
+
+    document.getElementById("occMeta").innerText = `place=${place} | files=exp_occupancy_A.json, exp_occupancy_B.json`;
+    document.getElementById("occSummary").innerHTML = occRow("Ⅰ", A) + occRow("Ⅱ", B);
+
+    const apf = tail(A.per_frame || []);
+    const bpf2 = tail(B.per_frame || []);
+    document.getElementById("occPfMeta").innerText = `shown(last ${LIMIT}): A=${apf.length}, B=${bpf2.length}`;
+
+    drawLineChart("occSeatChart",[
+      {name:"A seat", color:"rgba(0,180,0,0.9)", xs:apf.map(r=>+r.frame), ys:apf.map(r=>+(r.seat_accuracy ?? 0))},
+      {name:"B seat", color:"rgba(11,87,208,0.9)", xs:bpf2.map(r=>+r.frame), ys:bpf2.map(r=>+(r.seat_accuracy ?? 0))}
+    ],{ymin:0,ymax:1});
+
+    drawLineChart("occTableChart",[
+      {name:"A table", color:"rgba(0,180,0,0.9)", xs:apf.map(r=>+r.frame), ys:apf.map(r=>+(r.table_accuracy ?? 0))},
+      {name:"B table", color:"rgba(11,87,208,0.9)", xs:bpf2.map(r=>+r.frame), ys:bpf2.map(r=>+(r.table_accuracy ?? 0))}
+    ],{ymin:0,ymax:1});
+  }
+
+  (async function main(){
+    await render();
+    setInterval(()=>render().catch(console.error), REFRESH_MS);
+  })();
+</script>
+{% endblock %}

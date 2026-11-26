@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.DS_Store
+# 원본 영상·프레임은 개인정보 보호를 위해 업로드하지 않음
+data/places/*/media/

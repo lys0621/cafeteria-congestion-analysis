@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+
+{% block title %}About{% endblock %}
+{% block page_title %}About 우리 팀을 소개합니다{% endblock %}
+{% block page_subtitle %}Project Details & Team Members{% endblock %}
+
+{% block content %}
+<style>
+  /* 기본 레이아웃 */
+  .about-container {
+    max-width: 1000px;
+    margin: 0 auto;
+    font-family: 'Pretendard', sans-serif;
+    color: #333;
+    line-height: 1.6;
+  }
+
+  h2 {
+    border-left: 5px solid #007bff;
+    padding-left: 15px;
+    margin-bottom: 25px;
+    font-size: 1.5rem;
+  }
+
+  section {
+    background: #fff;
+    padding: 30px;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    margin-bottom: 40px;
+  }
+
+  /* 팀원 소개 카드 스타일 */
+  .member-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+  }
+  .member-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 20px;
+  }
+
+  .member-card {
+    background: #f8f9fa;
+    padding: 20px;
+    border-radius: 10px;
+    text-align: center;
+    border: 1px solid #eee;
+    
+    /* [추가] 부드러운 애니메이션을 위한 설정 */
+    transition: all 0.3s ease; 
+    cursor: default;
+  }
+
+  /* [추가] 호버 시: 위로 8px 이동 및 그림자 효과 */
+  .member-card:hover {
+    transform: translateY(-8px); /* 위로 이동 */
+    background: #ffffff; /* 배경색을 살짝 밝게 변경 */
+    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1); /* 떠 있는 느낌의 그림자 */
+    border-color: #007bff; /* 테두리 강조 */
+  }
+
+  .member-card .name { 
+    font-weight: bold; 
+    font-size: 1.1rem; 
+    color: #007bff; 
+    transition: color 0.3s ease;
+  }
+
+  /* 호버 시 이름 색상 강조 */
+  .member-card:hover .name {
+    color: #0056b3;
+  }
+
+  .member-card .role { 
+    font-size: 0.9rem; 
+    color: #666; 
+    margin-top: 5px; 
+  }
+
+  /* 프로젝트 개요 & 학습 설정 */
+  .setup-info {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 20px;
+    background: #e9ecef;
+    padding: 20px;
+    border-radius: 8px;
+    margin: 20px 0;
+  }
+  .setup-item { flex: 1; min-width: 150px; }
+  .setup-item b { display: block; color: #495057; font-size: 0.85rem; }
+
+  /* 학습 설정 그룹 박스 */
+  .setup-box {
+    border: 1px solid var(--border); /* 테두리 두께, 스타일, 색상 */
+    border-radius: 12px;
+    padding: 20px;
+    background-color: #fcfcfd; /* 아주 연한 배경색으로 구분감 부여 */
+    margin: 20px 0 30px 0;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.02); /* 안쪽으로 살짝 들어간 느낌 */
+  }
+  
+  .setup-box h3 {
+    margin-top: 0; /* 박스 내부 상단 여백 제거 */
+  }
+
+  /* 테이블 스타일 (성능 비교) */
+  .comparison-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 15px;
+    overflow: hidden;
+    border-radius: 8px;
+  }
+  .comparison-table th { background: #4680bf9d; color: white; padding: 12px;}
+  .comparison-table td { padding: 12px; border: 1px solid #3333332f; text-align: center;}
+  .comparison-table tr:hover { background: #f1f8ff; }
+  .highlight-row { background: #fff9db; font-weight: bold; }
+  
+  /* 기술 스택 태그 */
+  .stack-list { display: flex; flex-wrap: wrap; gap: 10px; list-style: none !important; padding: 0 !important; }
+  .stack-tag {
+    background: #6c7d6d;
+    color: white;
+    padding: 5px 15px;
+    border-radius: 20px;
+    font-size: 0.9rem;
+  }
+</style>
+
+<div class="about-container">
+  
+  <section class="member">
+    <h2>팀원 소개</h2>
+    <div class="member-grid">
+      <div class="member-card">
+        <div class="name">김소연</div>
+        <div class="role">팀장 / 모델 설계 및 학습</div>
+      </div>
+      <div class="member-card">
+        <div class="name">박정현</div>
+        <div class="role">데이터 수집 및 라벨링</div>
+      </div>
+      <div class="member-card">
+        <div class="name">이윤슬</div>
+        <div class="role">점유 로직 및 혼잡도 계산</div>
+      </div>
+      <div class="member-card">
+        <div class="name">이민영</div>
+        <div class="role">웹 프론트엔드 및 백엔드</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="overview">
+    <h2>프로젝트 개요</h2>
+    <p>
+      학교 식당에 갔을 때, 자리가 없어 발걸음을 돌려야 했던 경험이 있어 이러한 불편함을 줄이고자 좌석 점유율과 식당의 혼잡도를 알려주는 AI를 만들게 되었습니다.<br>
+      본 프로젝트는 <strong>YOLOv8 Large</strong> 모델을 기반으로 합니다. 
+      높은 검출 정확도를 확보하기 위해 Small/Medium 대신 Large 모델을 선택하였으며, 특정 환경에 최적화하기 위해 <strong>미세조정(Fine-tuning)</strong>을 진행했습니다.
+      데이터를 구하는 과정에서 학교에 문의하여 동의를 얻고 데이터를 구하려 하였으나, 학교 규정의 이유를 구할 수 없어 <strong>Roboflow</strong>를 통해 프로젝트에 진행할 식당 및 카페 데이터를 구하였습니다.<br>
+      
+    </p>
+    <br><br>
+    <div class="setup-box">
+    <h3>📍 학습 설정 (Hyperparameters)</h3>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+      <div>
+        <h4 style="text-align: center;">Place A (R2)</h4>
+        <div class="setup-info">
+          <div class="setup-item"><b>Data</b> 27 Train / 10 Val</div>
+          <div class="setup-item"><b>Epochs</b> 150</div>
+          <div class="setup-item"><b>Img Size</b> 640</div>
+          <div class="setup-item"><b>Batch</b> 4</div>
+        </div>
+      </div>
+      <div>
+        <h4 style="text-align: center;">Place B (R1)</h4>
+        <div class="setup-info">
+          <div class="setup-item"><b>Data</b> 35 Train / 10 Val</div>
+          <div class="setup-item"><b>Epochs</b> 150</div>
+          <div class="setup-item"><b>Img Size</b> 960</div>
+          <div class="setup-item"><b>Freeze</b> 20</div>
+        </div>
+      </div>
+    </div>
+    </div>
+    <h3>📊 모델 성능 비교</h3>
+    <table class="comparison-table">
+      <thead style="border-color: #333;">
+        <tr>
+          <th>구분</th>
+          <th>모델 버전</th>
+          <th>Precision</th>
+          <th>Recall</th>
+          <th>Avg FPS</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr class="highlight-row">
+          <td rowspan="2" style="background-color: #97c7999e;">Place B (R1)</td>
+          <td>Fine-tuned</td>
+          <td>0.904</td>
+          <td>0.894</td>
+          <td>29.63</td>
+        </tr>
+        <tr>
+          <td>YOLOv8L (기본)</td>
+          <td>0.757</td>
+          <td>0.706</td>
+          <td>32.07</td>
+        </tr>
+        <tr class="highlight-row">
+          <td rowspan="2" style="background-color: #97c7999e;">Place A (R2)</td>
+          <td>Fine-tuned</td>
+          <td>0.853</td>
+          <td>0.939</td>
+          <td>20.15</td>
+        </tr>
+        <tr>
+          <td>YOLOv8L (기본)</td>
+          <td>0.690</td>
+          <td>0.283</td>
+          <td>36.16</td>
+        </tr>
+      </tbody>
+    </table>
+    <p style="margin-top:15px; font-size: 0.9rem; color: #666;">
+      * Fine-tuning 결과, Precision과 Recall이 대폭 향상되어 실제 환경 검출에 훨씬 적합함을 확인했습니다.
+    </p>
+  </section>
+
+  <section class="stack">
+    <h2>기술 스택</h2>
+    <div style="margin-bottom: 15px;">
+      <strong>AI & Logic:</strong>
+      <div class="stack-list" style="margin-top:5px;">
+        <span class="stack-tag">Python</span>
+        <span class="stack-tag">YOLOv8</span>
+        <span class="stack-tag">OpenCV</span>
+      </div>
+    </div>
+    <div>
+      <strong>Web Development:</strong>
+      <div class="stack-list" style="margin-top:5px;">
+        <span class="stack-tag">Flask</span>
+        <span class="stack-tag">HTML5/CSS3</span>
+        <span class="stack-tag">JavaScript</span>
+      </div>
+    </div>
+  </section>
+</div>
+
+{% endblock %}

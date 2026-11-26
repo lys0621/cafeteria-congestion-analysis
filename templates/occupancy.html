@@ -1,0 +1,329 @@
+{% extends "base.html" %}
+
+{% block title %}Occupancy{% endblock %}
+{% block page_title %}Occupancy{% endblock %}
+{% block page_subtitle %}현재 프레임 기준 좌석/테이블 점유 상태 + ROI/BBox 오버레이{% endblock %}
+
+{% block content %}
+<style>
+  .btn{ padding:8px 10px; border-radius:10px; border:1px solid var(--border); background:var(--bg2); color:var(--text); cursor:pointer; }
+  .btn.primary{ border-color:rgba(11,87,208,0.65); background:rgba(11,87,208,0.12); }
+  .wrap{ position:relative; border:1px solid var(--border); border-radius:12px; overflow:hidden; background:var(--bg2); }
+  .img{ width:100%; height:auto; display:block; }
+  .svg{ position:absolute; left:0; top:0; width:100%; height:100%; pointer-events:none; }
+  .pill{ display:inline-flex; gap:8px; align-items:center; padding:6px 10px; border:1px solid var(--border); border-radius:999px; background:var(--bg2); color:var(--muted); font-size:12px; }
+  .tbl{ width:100%; border-collapse:collapse; font-size:13px; }
+  .tbl th, .tbl td{ padding:6px 6px; border-bottom:1px solid var(--border); text-align:left; }
+  .tbl th{ color:var(--muted); font-weight:900; }
+  .badge{ display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid var(--border); font-size:12px; }
+  .badge.on{ background:rgba(0,180,0,0.12); border-color:rgba(0,140,0,0.45); }
+  .badge.off{ background:rgba(220,0,0,0.08); border-color:rgba(180,0,0,0.35); }
+</style>
+
+<div class="card" style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
+  <div>
+    <div id="note" style="font-weight:900;">Loading...</div>
+    <div id="meta" style="color:var(--muted); font-size:13px; margin-top:4px;"></div>
+  </div>
+  <div style="display:flex; gap:8px; align-items:center;">
+    <button id="btnStart" class="btn primary">Start</button>
+    <button id="btnStop"  class="btn">Stop</button>
+    <button id="btnReset" class="btn">Reset</button>
+  </div>
+</div>
+
+<div class="spacer"></div>
+
+<div class="row" style="align-items:flex-start;">
+  <div class="card" style="flex:1; min-width:520px;">
+    <div class="wrap">
+      <img id="frameImg" class="img" alt="frame"/>
+      <svg id="svg" class="svg"></svg>
+    </div>
+    <div class="spacer"></div>
+    <div id="kpiLine" class="pill">Seat=- | Table=- | Crowd=-</div>
+  </div>
+
+  <!-- Seats -->
+  <div class="card" style="flex:1; min-width:140px;">
+    <div style="font-weight:700; margin-bottom:8px;">
+      Seats Occupancy
+    </div>
+    <table class="tbl">
+      <thead><tr><th>Seat</th><th>Status</th></tr></thead>
+      <tbody id="seatRows"></tbody>
+    </table>
+  </div>
+
+  <!-- Tables -->
+  <div class="card" style="flex:1; min-width:140px;">
+    <div style="font-weight:700; margin-bottom:8px;">
+      Tables Occupancy
+    </div>
+    <table class="tbl">
+      <thead><tr><th>Table</th><th>Status</th></tr></thead>
+      <tbody id="tableRows"></tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+
+{% block scripts %}
+<script>
+  window.ACTIVE_NAV = "occ";
+
+  const TICK_MS = 1000;
+  const DET_CONF = 0.25;
+
+  let timer = null;
+
+  function getParam(name, fallback=null){
+    const u = new URL(window.location.href);
+    return u.searchParams.get(name) ?? fallback;
+  }
+  async function getJSON(url){
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return await r.json();
+  }
+  async function post(url){
+    const r = await fetch(url, {method:"POST"});
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    return await r.json();
+  }
+
+  function svgEl(tag, attrs={}){
+    const e = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    Object.entries(attrs).forEach(([k,v])=>e.setAttribute(k,String(v)));
+    return e;
+  }
+
+  function setFrameImage(place, frame){
+    const img = document.getElementById("frameImg");
+    img.src = `/api/frame_image?place=${encodeURIComponent(place)}&frame=${encodeURIComponent(frame)}&ts=${Date.now()}`;
+  }
+
+  function renderRows(elId, rows, key){
+    const el = document.getElementById(elId);
+    el.innerHTML = (rows||[]).map(r=>{
+      const id = r[key];
+      const occ = !!r.occupied;
+      return `<tr><td>${id}</td><td><span class="badge ${occ?"on":"off"}">${occ?"Occupied":"Empty"}</span></td></tr>`;
+    }).join("");
+  }
+
+  function drawOverlay(roi, seatsResp){
+    const svg = document.getElementById("svg");
+    svg.innerHTML = "";
+
+    const W = Number(roi.image_w || 640);
+    const H = Number(roi.image_h || 360);
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
+
+    const seatsMap = {};
+    (seatsResp.seats||[]).forEach(s=>seatsMap[s.seat_id]=!!s.occupied);
+    const tablesMap = {};
+    (seatsResp.tables||[]).forEach(t=>tablesMap[t.table_id]=!!t.occupied);
+
+    // tables
+    (roi.tables||[]).forEach(item=>{
+      const typ=item.type||"rect";
+      const fill="rgba(11,87,208,0.10)";
+      const stroke="rgba(11,87,208,0.55)";
+
+      if (typ==="polygon"){
+        const pts=(item.points||[]).map(p=>p.join(",")).join(" ");
+        svg.appendChild(svgEl("polygon",{points:pts, fill, stroke, "stroke-width":2}));
+      } else {
+        const r=item.roi||{};
+        const x1=+r.x1||0,y1=+r.y1||0,x2=+r.x2||0,y2=+r.y2||0;
+        svg.appendChild(svgEl("rect",{x:x1,y:y1,width:Math.max(0,x2-x1),height:Math.max(0,y2-y1), fill, stroke, "stroke-width":2}));
+      }
+
+      if (item.table_id){
+        const x=(typ==="polygon"?(item.points?.[0]?.[0]||0):(item.roi?.x1||0))+6;
+        const y=(typ==="polygon"?(item.points?.[0]?.[1]||0):(item.roi?.y1||0))+16;
+        const txt=svgEl("text",{x,y,fill:"rgba(11,87,208,0.95)","font-size":14,"font-weight":900});
+        txt.textContent = item.table_id + (tablesMap[item.table_id] ? " (occ)" : "");
+        svg.appendChild(txt);
+      }
+    });
+
+    // Counters 추가 (display-only, gray dashed) ----------
+    const zones = roi.counters || [];
+    zones.forEach(item => {
+      const typ = item.type || "rect";
+      const zoneId = item.zone_id || item.roi_id || "";
+
+      if (typ === "polygon") {
+        const pts = (item.points || []).map(p => p.join(",")).join(" ");
+        svg.appendChild(svgEl("polygon", {
+          points: pts,
+          fill: "rgba(80,80,80,0.10)",
+          stroke: "rgba(80,80,80,0.65)",
+          "stroke-width": 2,
+          "stroke-dasharray": "6 4"
+        }));
+
+        // label (optional)
+        const ps = (item.points || []);
+        if (ps.length >= 3 && zoneId) {
+          const cx = ps.reduce((s,p)=>s+p[0],0) / ps.length;
+          const cy = ps.reduce((s,p)=>s+p[1],0) / ps.length;
+          const text = svgEl("text", {
+            x: cx, y: cy,
+            "font-size": 14,
+            "font-weight": 800,
+            fill: "rgba(60,60,60,0.9)",
+            "text-anchor": "middle",
+            "dominant-baseline": "middle"
+          });
+          text.textContent = zoneId;
+          svg.appendChild(text);
+        }
+      } else {
+        const r = item.roi || {};
+        const x1 = Number(r.x1||0), y1 = Number(r.y1||0), x2 = Number(r.x2||0), y2 = Number(r.y2||0);
+        svg.appendChild(svgEl("rect", {
+          x: x1, y: y1, width: Math.max(0, x2-x1), height: Math.max(0, y2-y1),
+          fill: "rgba(80,80,80,0.10)",
+          stroke: "rgba(80,80,80,0.65)",
+          "stroke-width": 2,
+          "stroke-dasharray": "6 4"
+        }));
+
+        // label (optional)
+        if (zoneId) {
+          const cx = x1 + Math.max(0, x2-x1)/2;
+          const cy = y1 + Math.max(0, y2-y1)/2;
+          const text = svgEl("text", {
+            x: cx, y: cy,
+            "font-size": 14,
+            "font-weight": 800,
+            fill: "rgba(60,60,60,0.9)",
+            "text-anchor": "middle",
+            "dominant-baseline": "middle"
+          });
+          text.textContent = zoneId;
+          svg.appendChild(text);
+        }
+      }
+    });
+
+    // seats
+    (roi.seats||[]).forEach(item=>{
+      const sid=item.seat_id;
+      const occ=!!seatsMap[sid];
+      const fill=occ?"rgba(0,180,0,0.18)":"rgba(220,0,0,0.18)";
+      const stroke=occ?"rgba(0,140,0,0.75)":"rgba(180,0,0,0.75)";
+      const typ=item.type||"rect";
+
+      if (typ==="polygon"){
+        const pts=(item.points||[]).map(p=>p.join(",")).join(" ");
+        svg.appendChild(svgEl("polygon",{points:pts, fill, stroke, "stroke-width":2}));
+      } else {
+        const r=item.roi||{};
+        const x1=+r.x1||0,y1=+r.y1||0,x2=+r.x2||0,y2=+r.y2||0;
+        svg.appendChild(svgEl("rect",{x:x1,y:y1,width:Math.max(0,x2-x1),height:Math.max(0,y2-y1), fill, stroke, "stroke-width":2}));
+      }
+
+      if (sid){
+        const x=(typ==="polygon"?(item.points?.[0]?.[0]||0):(item.roi?.x1||0))+6;
+        const y=(typ==="polygon"?(item.points?.[0]?.[1]||0):(item.roi?.y1||0))+16;
+        const txt=svgEl("text",{x,y,fill:"rgba(40,40,40,0.95)","font-size":14,"font-weight":900});
+        txt.textContent = sid;
+        svg.appendChild(txt);
+      }
+    });
+
+    // bbox
+    (seatsResp.detections||[]).forEach(d=>{
+      svg.appendChild(svgEl("rect",{
+        x:+d.x1||0,y:+d.y1||0,
+        width:Math.max(0,(+d.x2||0)-(+d.x1||0)),
+        height:Math.max(0,(+d.y2||0)-(+d.y1||0)),
+        fill:"rgba(255,0,0,0.00)",
+        stroke:"rgba(255,0,0,0.85)",
+        "stroke-width":2
+      }));
+    });
+  }
+
+  async function renderOnceAndMaybeStep(){
+    const place = getParam("place","placeA");
+    const occ_method = getParam("occ_method","B");
+
+    const st = await getJSON(`/api/player/state?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    if (st.frame == null){
+      document.getElementById("note").innerText = "No frames in pred_occupancy.";
+      return;
+    }
+
+    const roiInfo = await getJSON(`/api/place_info?place=${encodeURIComponent(place)}`);
+    const seats = await getJSON(`/api/seats?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}&frame=${encodeURIComponent(st.frame)}&det_variant=ft&conf=${DET_CONF}`);
+
+    document.getElementById("note").innerText =
+      `playing=${st.playing} | idx=${st.idx+1}/${st.n_frames} | frame=${seats.frame} | ts=${seats.timestamp} | people=${seats.people_count}`;
+
+    const meta = document.getElementById("meta");
+    if (meta) meta.innerText = `source=${seats.source ?? "-"}`;
+
+    renderRows("seatRows", seats.seats, "seat_id");
+    renderRows("tableRows", seats.tables, "table_id");
+
+    const k = document.getElementById("kpiLine");
+    if (k) k.innerText = `Seat=${seats.seat_occupancy_rate}% | Table=${seats.table_occupancy_rate}% | Crowd=${seats.crowd_level}`;
+
+    setFrameImage(place, seats.frame);
+    drawOverlay(roiInfo.roi || {}, seats);
+
+    if (st.playing){
+      await post(`/api/player/step?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    }
+  }
+
+  function startLoop(){
+    if (timer) return;
+    timer = setInterval(() => renderOnceAndMaybeStep().catch(console.error), TICK_MS);
+  }
+  function stopLoop(){
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+
+  async function onStart(){
+    const place = getParam("place","placeA");
+    const occ_method = getParam("occ_method","B");
+    await post(`/api/player/start?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    await renderOnceAndMaybeStep();
+  }
+  async function onStop(){
+    const place = getParam("place","placeA");
+    const occ_method = getParam("occ_method","B");
+    await post(`/api/player/stop?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    await renderOnceAndMaybeStep();
+  }
+  async function onReset(){
+    const place = getParam("place","placeA");
+    const occ_method = getParam("occ_method","B");
+    await post(`/api/player/reset?place=${encodeURIComponent(place)}&occ_method=${encodeURIComponent(occ_method)}`);
+    await renderOnceAndMaybeStep();
+  }
+
+  (async function init(){
+    await renderOnceAndMaybeStep();
+    startLoop();
+
+    const s = document.getElementById("btnStart");
+    const p = document.getElementById("btnStop");
+    const r = document.getElementById("btnReset");
+    if (s) s.addEventListener("click", ()=>onStart().catch(console.error));
+    if (p) p.addEventListener("click", ()=>onStop().catch(console.error));
+    if (r) r.addEventListener("click", ()=>onReset().catch(console.error));
+
+    window.addEventListener("beforeunload", ()=>stopLoop());
+  })();
+</script>
+{% endblock %}
